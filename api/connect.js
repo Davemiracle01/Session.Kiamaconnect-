@@ -4,7 +4,7 @@ const {
     fetchLatestWaWebVersion,
     DisconnectReason,
     makeCacheableSignalKeyStore
-} = require('gifted-baileys');
+} = require('@whiskeysockets/baileys');
 
 const QRCode = require('qrcode');
 const pino = require('pino');
@@ -14,12 +14,10 @@ const zlib = require('zlib');
 const os = require('os');
 
 module.exports = async function handler(req, res) {
-    // ── CORS ──────────────────────────────────────────────────────────────────
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
-    // ── SSE headers ───────────────────────────────────────────────────────────
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -36,8 +34,9 @@ module.exports = async function handler(req, res) {
     const phone = (req.query.phone || '').replace(/[^0-9]/g, '');
     const usePairing = phone.length > 7;
 
-    // ── Temp session dir (cleaned up after) ───────────────────────────────────
-    const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiama-'));
+    const sessionDir = path.join(os.tmpdir(), `kiama_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+    fs.mkdirSync(sessionDir, { recursive: true });
+
     let sock;
     let done = false;
 
@@ -47,6 +46,17 @@ module.exports = async function handler(req, res) {
     };
 
     req.on('close', () => { if (!done) cleanup(); });
+
+    const pingInterval = setInterval(() => {
+        try { res.write(': ping\n\n'); if (res.flush) res.flush(); } catch (_) {}
+    }, 15000);
+
+    const finish = () => {
+        done = true;
+        clearInterval(pingInterval);
+        cleanup();
+        try { res.end(); } catch (_) {}
+    };
 
     try {
         const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
@@ -62,7 +72,9 @@ module.exports = async function handler(req, res) {
             },
             browser: ['Ubuntu', 'Chrome', '22.04.4'],
             printQRInTerminal: false,
-            markOnlineOnConnect: false
+            markOnlineOnConnect: false,
+            generateHighQualityLinkPreview: false,
+            getMessage: async () => undefined
         });
 
         sock.ev.on('creds.update', saveCreds);
@@ -73,35 +85,40 @@ module.exports = async function handler(req, res) {
             if (done) return;
             const { connection, qr, lastDisconnect } = update;
 
-            // ── QR or Pairing code ─────────────────────────────────────────
             if (qr) {
                 if (usePairing && !pairingRequested) {
                     pairingRequested = true;
                     try {
+                        await new Promise(r => setTimeout(r, 2000));
                         const code = await sock.requestPairingCode(phone);
-                        send('pairing_code', { code: code.match(/.{1,4}/g).join('-') });
+                        const formatted = code.match(/.{1,4}/g)?.join('-') || code;
+                        send('pairing_code', { code: formatted });
                     } catch (e) {
                         send('error', { message: 'Failed to get pairing code: ' + e.message });
+                        finish();
                     }
                 } else if (!usePairing) {
                     try {
-                        const image = await QRCode.toDataURL(qr, { margin: 1, width: 300 });
+                        const image = await QRCode.toDataURL(qr, { margin: 1, width: 280 });
                         send('qr', { image });
                     } catch (e) {
                         send('error', { message: 'QR generation failed' });
+                        finish();
                     }
                 }
             }
 
-            // ── Connected ──────────────────────────────────────────────────
             if (connection === 'open') {
                 send('status', { message: 'Connected! Generating session ID...' });
-                await new Promise(r => setTimeout(r, 2500));
+                await new Promise(r => setTimeout(r, 3000));
+                await saveCreds();
+                await new Promise(r => setTimeout(r, 1000));
 
                 const credsPath = path.join(sessionDir, 'creds.json');
                 if (!fs.existsSync(credsPath)) {
-                    send('error', { message: 'creds.json not found. Please try again.' });
-                    res.end(); cleanup(); done = true; return;
+                    send('error', { message: 'Session file not found. Please try again.' });
+                    finish();
+                    return;
                 }
 
                 const raw = fs.readFileSync(credsPath, 'utf8');
@@ -110,26 +127,23 @@ module.exports = async function handler(req, res) {
                 const sessionId = `KiamaConnect~${b64}`;
 
                 send('session', { id: sessionId });
-                done = true;
-                cleanup();
-                res.end();
+                finish();
             }
 
-            // ── Closed ─────────────────────────────────────────────────────
             if (connection === 'close') {
+                if (done) return;
                 const reason = lastDisconnect?.error?.output?.statusCode;
-                if (!done) {
-                    send('error', { message: `Connection closed (${reason || 'unknown'}). Please try again.` });
-                    done = true;
-                    cleanup();
-                    res.end();
-                }
+                send('error', {
+                    message: reason === DisconnectReason.loggedOut
+                        ? 'WhatsApp rejected the session. Please try again.'
+                        : `Connection closed (${reason || 'unknown'}). Please try again.`
+                });
+                finish();
             }
         });
 
     } catch (err) {
-        send('error', { message: err.message });
-        cleanup();
-        res.end();
+        send('error', { message: err.message || 'Unexpected error. Please try again.' });
+        finish();
     }
 };
