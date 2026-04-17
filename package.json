@@ -5,7 +5,7 @@
   "main": "api/connect.js",
   "type": "commonjs",
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   },
   "dependencies": {
     "gifted-baileys": "2.5.8",
