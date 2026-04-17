@@ -1,0 +1,16 @@
+{
+  "name": "kiama-session-generator",
+  "version": "1.0.0",
+  "description": "KiamaConnect WhatsApp Session ID Generator",
+  "main": "api/connect.js",
+  "type": "commonjs",
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "gifted-baileys": "2.5.8",
+    "qrcode": "^1.5.3",
+    "pino": "^7.0.5",
+    "fs-extra": "^11.1.0"
+  }
+}
